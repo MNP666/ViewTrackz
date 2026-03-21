@@ -1,0 +1,17 @@
+# ViewTrackz dependencies
+
+# Dashboard
+panel>=1.4.0
+bokeh>=3.4.0
+
+# Data
+pandas>=2.0.0
+pyarrow>=15.0.0
+duckdb>=0.10.0
+numpy>=1.26.0
+
+# Charts (RunTrackz uses matplotlib; Panel embeds via pn.pane.Matplotlib)
+matplotlib>=3.8.0
+
+# Dev / workbench
+jupyterlab>=4.0.0

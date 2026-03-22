@@ -1,7 +1,10 @@
 """
-ViewTrackz — placeholder layout
---------------------------------
-Self-contained runnable dashboard with fake data and reactive Bokeh plots.
+ViewTrackz — main dashboard
+-----------------------------
+Serves the full ViewTrackz UI.  Prototype tabs (Tempo, Intervals, etc.) still
+use generated fake data; the Long Run tab uses the real LongRunTab component
+from viewtrackz.tabs.long_run and runs the full RunTrackz analysis pipeline
+when a .fit file is uploaded and Analyse is clicked.
 
 Run:
     panel serve app.py --show
@@ -10,6 +13,10 @@ Run:
 
 from __future__ import annotations
 
+import pathlib
+import sys
+import tempfile
+
 import numpy as np
 import pandas as pd
 import panel as pn
@@ -17,6 +24,15 @@ from bokeh.plotting import figure
 from bokeh.models import Span, BoxAnnotation
 
 pn.extension(sizing_mode="stretch_width", notifications=True)
+
+# ── Wire in the real LongRunTab from the viewtrackz package ──────────────────
+_HERE = pathlib.Path(__file__).parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from viewtrackz.tabs.long_run import LongRunTab as _LongRunTabClass  # noqa: E402
+
+_long_run_tab_obj = _LongRunTabClass({})
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -295,6 +311,75 @@ type_sel = pn.widgets.Select(
 analyse_btn = pn.widgets.Button(name="⚡  Analyse", button_type="success",  width=150)
 save_btn    = pn.widgets.Button(name="💾  Save",    button_type="warning",  width=130)
 
+
+def _on_analyse_click(event):
+    """Run the RunTrackz analysis pipeline for the uploaded .fit file."""
+    if fit_file_input.value is None or not fit_file_input.filename:
+        pn.state.notifications.error(
+            "No .fit file uploaded — use the sidebar to upload a file first.",
+            duration=5000,
+        )
+        return
+
+    act_type = type_sel.value  # e.g. "Long Run"
+
+    analyse_btn.loading = True
+    analyse_btn.name    = "Analysing…"
+    tmp_path = None
+
+    try:
+        # ── Save bytes to a temp file ────────────────────────────────────
+        suffix = pathlib.Path(fit_file_input.filename).suffix or ".fit"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(fit_file_input.value)
+            tmp_path = pathlib.Path(tmp.name)
+
+        # ── Load via FitTrackz adapter ───────────────────────────────────
+        from viewtrackz.fittrackz_adapter import load as _fit_load
+        from runtrackz import hr_analysis, pace_analysis
+        from runtrackz.long_run_analysis import (
+            analyze as _lr_analyze,
+            analyze_form_resilience as _lr_form,
+        )
+
+        run        = _fit_load(tmp_path)
+        hr_stats   = hr_analysis.analyze(run)
+        pace_stats = pace_analysis.analyze(run)
+
+        if act_type == "Long Run":
+            long_run_stats  = _lr_analyze(run, hr_stats=hr_stats, pace_stats=pace_stats)
+            form_resilience = _lr_form(run)
+            _long_run_tab_obj.update(
+                long_run_stats=long_run_stats,
+                form_resilience=form_resilience,
+            )
+            pn.state.notifications.success(
+                f"Long run analysis complete — switch to the Long Run tab.",
+                duration=5000,
+            )
+        else:
+            pn.state.notifications.info(
+                f"Analysis for '{act_type}' is not yet wired up in this prototype.",
+                duration=5000,
+            )
+
+    except Exception as exc:
+        pn.state.notifications.error(
+            f"Analysis failed: {exc}",
+            duration=10_000,
+        )
+    finally:
+        analyse_btn.loading = False
+        analyse_btn.name    = "⚡  Analyse"
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+analyse_btn.on_click(_on_analyse_click)
+
 tab_smooth = pn.Column(
     # ── Step 1: Channel & smoother controls ────────────────────────────────
     section("1 · Channel Selection & Smoothing"),
@@ -451,22 +536,10 @@ def stat_row(*cards):
     return pn.Row(*cards, sizing_mode="stretch_width")
 
 # ── Long Run ──────────────────────────────────────────────────────────────────
+# Uses the real LongRunTab component.  Upload a .fit file and click Analyse
+# to populate it; until then it shows a placeholder message.
 
-tab_long_run = pn.Column(
-    pn.pane.Markdown("## Long Run"),
-    stat_row(
-        stat_card("Distance",        "12.5 km"),
-        stat_card("Duration",        "1:04:22"),
-        stat_card("Avg HR",          "148 bpm"),
-        stat_card("Cardiac Drift",   "4.2 %"),
-        stat_card("Pacing Strategy", "Positive"),
-    ),
-    pn.layout.Divider(),
-    pn.Row(_static_hr(), _thirds_bar()),
-    pn.layout.Divider(),
-    pn.Row(_zone_bar(), _splits_bar()),
-    sizing_mode="stretch_width",
-)
+tab_long_run = _long_run_tab_obj.panel()
 
 # ── Tempo ─────────────────────────────────────────────────────────────────────
 
@@ -946,13 +1019,15 @@ tab_aggregates = pn.Column(
 # SIDEBAR  (file upload only)
 # ══════════════════════════════════════════════════════════════════════════════
 
+fit_file_input = pn.widgets.FileInput(accept=".fit", sizing_mode="stretch_width")
+
 sidebar = pn.Column(
     pn.pane.Markdown("### Upload Activity"),
-    pn.widgets.FileInput(accept=".fit", sizing_mode="stretch_width"),
+    fit_file_input,
     pn.pane.HTML(
         '<p style="font-size:11px;color:#999;margin-top:6px;">'
-        "Upload a .fit file to start.<br>"
-        "Parsed data will appear in the<br><em>Load &amp; Smooth</em> tab."
+        "Upload a .fit file, then select<br>"
+        "<em>Long Run</em> and click ⚡ Analyse."
         "</p>"
     ),
 )
@@ -980,6 +1055,7 @@ template = pn.template.FastListTemplate(
     main=[tabs],
     accent=ACCENT,
     sidebar_width=240,
+    collapsed_sidebar=False,
 )
 
 template.servable()

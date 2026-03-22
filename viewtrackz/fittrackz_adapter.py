@@ -84,10 +84,15 @@ _CHANNEL_MAP: dict[str, str] = {
     "smoothed_altitude":   "altitude_m",
     "smoothed_cadence":    "cadence",
     "smoothed_power":      "power_w",
-    # running dynamics (Coros-specific channels)
+    # running dynamics (Coros-native channels)
     "smoothed_stride_length":        "stride_length_m",
     "smoothed_vertical_oscillation": "vertical_oscillation_cm",
     "smoothed_stance_time":          "stance_time_ms",
+    # Stryd developer fields (present only when Stryd pod is paired)
+    "smoothed_leg_spring_stiffness": "leg_spring_stiffness",
+    "smoothed_form_power":           "form_power_w",
+    "smoothed_air_power":            "air_power_w",
+    "smoothed_impact_loading_rate":  "impact_loading_rate",
 }
 
 

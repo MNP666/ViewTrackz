@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS analysis_long_run (
     pacing_strategy         VARCHAR,
     first_half_pace_min_km  FLOAT,
     second_half_pace_min_km FLOAT,
-    thirds_json             VARCHAR     -- JSON-encoded list of RunThird dicts
+    thirds_json             VARCHAR,    -- JSON-encoded list of RunThird dicts
+    form_resilience_json    VARCHAR     -- JSON-encoded FormResilienceStats (windows + baselines)
 );
 
 CREATE TABLE IF NOT EXISTS analysis_tempo (
@@ -114,10 +115,25 @@ def get_db(path: Path = DATABASE_PATH):
         conn.close()
 
 
+_MIGRATIONS = [
+    # Add form_resilience_json to analysis_long_run for databases created before
+    # this column was added.  ALTER TABLE … ADD COLUMN IF NOT EXISTS is idempotent.
+    "ALTER TABLE analysis_long_run ADD COLUMN IF NOT EXISTS form_resilience_json VARCHAR",
+]
+
+
 def ensure_schema(path: Path = DATABASE_PATH) -> None:
-    """Create all tables if they don't exist yet.  Safe to call on every startup."""
+    """Create all tables if they don't exist yet, then apply any pending migrations.
+
+    Safe to call on every startup — all DDL and migrations are idempotent.
+    """
     with get_db(path) as conn:
         conn.execute(_DDL)
+        for migration in _MIGRATIONS:
+            try:
+                conn.execute(migration)
+            except Exception:
+                pass  # table may not exist yet on a fresh DB; CREATE IF NOT EXISTS handles it
 
 
 # ── Save ──────────────────────────────────────────────────────────────────────
@@ -228,14 +244,43 @@ def _insert_type_stats(conn, activity_id: uuid.UUID, activity_type: str, stats) 
              "avg_hr": t.avg_hr, "distance_m": t.distance_m}
             for t in (stats.thirds or [])
         ])
+        # Persist form resilience if it was computed (it's stored on the stats
+        # object as an optional attribute set by the caller).
+        form_resilience = getattr(stats, 'form_resilience', None)
+        if form_resilience is not None:
+            fr = form_resilience
+            form_resilience_json = json.dumps({
+                "baseline_end_km":          fr.baseline_end_km,
+                "baseline_stride_length_m": fr.baseline_stride_length_m,
+                "baseline_cadence":         fr.baseline_cadence,
+                "baseline_leg_spring":      fr.baseline_leg_spring,
+                "stride_breakdown_km":      fr.stride_breakdown_km,
+                "cadence_breakdown_km":     fr.cadence_breakdown_km,
+                "leg_spring_breakdown_km":  fr.leg_spring_breakdown_km,
+                "pace_zone_thresholds":     list(fr.pace_zone_thresholds) if fr.pace_zone_thresholds else None,
+                "windows": [
+                    {
+                        "distance_km":             w.distance_km,
+                        "pace_min_km":             w.pace_min_km,
+                        "pace_zone":               w.pace_zone,
+                        "stride_length_drift_pct": w.stride_length_drift_pct,
+                        "cadence_drift_pct":       w.cadence_drift_pct,
+                        "leg_spring_drift_pct":    w.leg_spring_drift_pct,
+                    }
+                    for w in fr.windows
+                ],
+            })
+        else:
+            form_resilience_json = None
         conn.execute("""
             INSERT INTO analysis_long_run (
                 activity_id, cardiac_drift_pct, pacing_strategy,
-                first_half_pace_min_km, second_half_pace_min_km, thirds_json
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                first_half_pace_min_km, second_half_pace_min_km,
+                thirds_json, form_resilience_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """, [aid, stats.cardiac_drift_pct, stats.pacing_strategy,
               stats.first_half_pace_min_km, stats.second_half_pace_min_km,
-              thirds_json])
+              thirds_json, form_resilience_json])
 
     elif activity_type == "tempo":
         conn.execute("""

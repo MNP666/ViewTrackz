@@ -10,18 +10,30 @@ this file changes — nothing else in the app needs to.
 Responsibilities
 ----------------
 1. Call the FitTrackz binary via subprocess (delegates to FitTrackz's own
-   ``analysis/utils.run_fit`` wrapper).
+   ``analysis/utils.run_fit`` / ``run_fit_metadata`` wrappers).
 2. Map FitTrackz output column names  →  RunTrackz ``DATAFRAME_SCHEMA``.
 3. Build and return a ``RunData`` object ready for analysis.
 
-FitTrackz output columns
-------------------------
+Two entry points
+----------------
+``load_metadata(fit_path)``
+    Lightweight — calls ``fit-cli <path> metadata``, returns a plain dict
+    with device info, session totals, and sport from the FIT file header.
+    Use this first when a file is uploaded to populate the database.
+
+``load(fit_path, smoother, ...)``
+    Full parse — calls ``fit-cli`` for all requested channels, applies
+    smoothing, maps columns to RunTrackz schema, returns a ``RunData``.
+    Called when the user clicks "Analyse".
+
+FitTrackz output columns  (from ``run_fit()``)
+-----------------------------------------------
     timestamp      FIT epoch seconds (int)
     time           UTC datetime (pandas Timestamp, already converted)
     elapsed_min    minutes from start
     distance_m     cumulative distance
     raw_<ch>       unsmoothed channel values
-    smoothed_<ch>  smoothed channel values   ← we use these
+    smoothed_<ch>  smoothed channel values   ← used by RunTrackz
 
 RunTrackz DATAFRAME_SCHEMA (required columns)
 ---------------------------------------------
@@ -32,10 +44,18 @@ RunTrackz DATAFRAME_SCHEMA (required columns)
     pace_min_km    min/km (derived automatically)
     distance_m     m
     elapsed_s      s      (derived automatically)
+
+FIT epoch conversion
+--------------------
+    ``time_created`` and ``start_time`` in the metadata dict are raw FIT
+    epoch seconds (since 1989-12-31 UTC).  Convert with:
+        pd.to_datetime(value + 631_065_600, unit='s', utc=True)
 """
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -65,9 +85,87 @@ _CHANNEL_MAP: dict[str, str] = {
     "smoothed_cadence":    "cadence",
     "smoothed_power":      "power_w",
     # running dynamics (Coros-specific channels)
+    "smoothed_stride_length":        "stride_length_m",
     "smoothed_vertical_oscillation": "vertical_oscillation_cm",
     "smoothed_stance_time":          "stance_time_ms",
 }
+
+
+def load_metadata(fit_path: Path | str) -> dict:
+    """
+    Extract activity-level metadata from a ``.fit`` file without decoding
+    per-second records.
+
+    Calls ``fit-cli <path> metadata`` which reads only the ``file_id``,
+    ``session``, and ``device_info`` FIT messages and returns JSON.
+
+    Parameters
+    ----------
+    fit_path : Path or str
+        Path to the ``.fit`` file.
+
+    Returns
+    -------
+    dict
+        Keys (all values may be ``None`` if the device did not record them):
+
+        Device
+            ``manufacturer``      str   — "garmin", "coros", "suunto", …
+            ``product_name``      str   — device model, e.g. "VERTIX 2S"
+            ``serial_number``     int
+            ``firmware_version``  str   — e.g. "4.20"
+            ``time_created``      int   — FIT epoch seconds
+
+        Session
+            ``sport``             str   — "running", "cycling", …
+            ``sub_sport``         str   — "generic", "trail", "treadmill", …
+            ``start_time``        int   — FIT epoch seconds
+            ``total_elapsed_s``   float — wall-clock duration incl. pauses
+            ``total_timer_s``     float — active time only
+            ``total_distance_m``  float
+            ``total_ascent_m``    float
+            ``total_descent_m``   float
+            ``total_calories``    int
+            ``avg_speed_ms``      float
+            ``max_speed_ms``      float
+            ``avg_heart_rate``    int
+            ``max_heart_rate``    int
+            ``avg_cadence``       int
+            ``max_cadence``       int
+            ``avg_power_w``       int
+            ``max_power_w``       int
+            ``training_stress_score`` float
+
+    Notes
+    -----
+    Convert ``time_created`` or ``start_time`` to a pandas Timestamp with::
+
+        pd.to_datetime(meta["start_time"] + 631_065_600, unit="s", utc=True)
+    """
+    from analysis.utils import REPO_ROOT  # FitTrackz repo root for cwd
+
+    fit_path = Path(fit_path)
+    if not fit_path.exists():
+        raise FileNotFoundError(f".fit file not found: {fit_path}")
+
+    cmd = [
+        "cargo", "run", "--release", "--bin", "fit-cli", "--",
+        str(fit_path),
+        "metadata",
+    ]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    if not result.stdout.strip():
+        raise RuntimeError(
+            f"fit-cli metadata produced no output for {fit_path}.\n"
+            f"stderr:\n{result.stderr}"
+        )
+    return json.loads(result.stdout)
 
 
 def load(

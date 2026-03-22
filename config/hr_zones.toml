@@ -1,0 +1,47 @@
+# ── ViewTrackz HR-zone configuration ─────────────────────────────────────────
+#
+# Set max_hr to YOUR measured maximum heart rate (bpm).
+# Zone boundaries are expressed as percentages of max_hr.
+# Colours are hex strings used in the dashboard bar chart.
+#
+# Five-zone model (Coggan / Joe Friel convention):
+#   Z1  Active recovery  — below 60 % max HR
+#   Z2  Aerobic base     — 60–70 %
+#   Z3  Tempo / aerobic  — 70–80 %
+#   Z4  Lactate threshold— 80–90 %
+#   Z5  VO2-max / sprint — above 90 %
+#
+# Adjust the percentages to match your own zone model if preferred.
+# ─────────────────────────────────────────────────────────────────────────────
+
+max_hr = 185          # bpm  ← update with your own max HR
+
+[[zones]]
+name    = "Z1 Recovery"
+min_pct = 0
+max_pct = 60
+color   = "#2ECC71"
+
+[[zones]]
+name    = "Z2 Aerobic"
+min_pct = 60
+max_pct = 70
+color   = "#27AE60"
+
+[[zones]]
+name    = "Z3 Tempo"
+min_pct = 70
+max_pct = 80
+color   = "#F39C12"
+
+[[zones]]
+name    = "Z4 Threshold"
+min_pct = 80
+max_pct = 90
+color   = "#E67E22"
+
+[[zones]]
+name    = "Z5 Max"
+min_pct = 90
+max_pct = 100
+color   = "#E74C3C"

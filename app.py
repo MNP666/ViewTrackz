@@ -26,7 +26,7 @@ from bokeh.models import Span, BoxAnnotation
 from bokeh.io import curdoc
 from bokeh.themes import built_in_themes
 
-pn.extension(sizing_mode="stretch_width", notifications=True)
+pn.extension("tabulator", sizing_mode="stretch_width", notifications=True)
 
 # Apply Bokeh dark theme globally so all figures match the Panel dark UI
 curdoc().theme = built_in_themes["dark_minimal"]
@@ -36,9 +36,11 @@ _HERE = pathlib.Path(__file__).parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from viewtrackz.tabs.long_run import LongRunTab as _LongRunTabClass  # noqa: E402
+from viewtrackz.tabs.long_run  import LongRunTab   as _LongRunTabClass   # noqa: E402
+from viewtrackz.tabs.intervals import IntervalsTab as _IntervalsTabClass  # noqa: E402
 
-_long_run_tab_obj = _LongRunTabClass({})
+_long_run_tab_obj  = _LongRunTabClass({})
+_intervals_tab_obj = _IntervalsTabClass({})
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -424,6 +426,17 @@ def _on_analyse_click(event):
             tabs.active = 1
             pn.state.notifications.success(
                 "Long run analysis complete!", duration=4000,
+            )
+        elif act_type == "Intervals":
+            # Push the RunData to the Intervals tab so it uses real data.
+            # The user defines their interval windows interactively in the tab,
+            # then clicks Apply to generate the plots.
+            _intervals_tab_obj.update(run_data=run)
+            # Auto-switch to the Intervals tab (index 3)
+            tabs.active = 3
+            pn.state.notifications.success(
+                "Workout loaded — set your interval boundaries and click ▶ Apply.",
+                duration=6000,
             )
         else:
             pn.state.notifications.info(
@@ -954,32 +967,7 @@ tab_tempo = pn.Column(
 
 # ── Intervals ─────────────────────────────────────────────────────────────────
 
-_intervals_df = pd.DataFrame({
-    "Rep":      range(1, 7),
-    "Pace":     ["3:52", "3:55", "3:50", "3:58", "3:53", "3:56"],
-    "Avg HR":   [172, 174, 171, 175, 173, 176],
-    "Dist (m)": [1002, 998, 1005, 997, 1001, 1003],
-    "HR Drop":  [28, 25, 30, 22, 27, 24],
-})
-
-tab_intervals = pn.Column(
-    pn.pane.Markdown("## Intervals"),
-    stat_row(
-        stat_card("Reps",             "6"),
-        stat_card("Avg Rep Pace",     "3:54 min/km"),
-        stat_card("Pace Consistency", "CV 0.8 %"),
-        stat_card("HR Consistency",   "CV 1.2 %"),
-    ),
-    pn.layout.Divider(),
-    pn.Row(
-        pn.Column(
-            pn.pane.Markdown("**Per-Rep Summary**"),
-            pn.widgets.DataFrame(_intervals_df, sizing_mode="stretch_width", height=230),
-        ),
-        _static_hr(260),
-    ),
-    sizing_mode="stretch_width",
-)
+tab_intervals = _intervals_tab_obj.panel()
 
 # ── Treadmill ─────────────────────────────────────────────────────────────────
 

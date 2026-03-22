@@ -20,10 +20,16 @@ import tempfile
 import numpy as np
 import pandas as pd
 import panel as pn
+import param
 from bokeh.plotting import figure
 from bokeh.models import Span, BoxAnnotation
+from bokeh.io import curdoc
+from bokeh.themes import built_in_themes
 
 pn.extension(sizing_mode="stretch_width", notifications=True)
+
+# Apply Bokeh dark theme globally so all figures match the Panel dark UI
+curdoc().theme = built_in_themes["dark_minimal"]
 
 # ── Wire in the real LongRunTab from the viewtrackz package ──────────────────
 _HERE = pathlib.Path(__file__).parent
@@ -165,12 +171,56 @@ PRESETS: dict[str, tuple[str, float]] = {
     "None (raw)":        ("None", 0.0),
 }
 
-# — channel selectors
+# ── Channel metadata ──────────────────────────────────────────────────────────
+# Options for the channel selector: {human-readable label: column key in raw_df}
+_CHANNEL_OPTS: dict[str, str] = {
+    "Heart Rate (bpm)":        "heart_rate",
+    "Pace (min/km)":           "speed",          # speed shown as pace
+    "Cadence (spm)":           "cadence",
+    "Altitude (m)":            "altitude",
+    "Power (W)":               "power",
+    "Stride Length (mm)":      "stride_length",
+    "Vert. Oscillation (mm)":  "vertical_oscillation",
+    "Stance Time (ms)":        "stance_time",
+    "Leg Spring (kN/m)":       "leg_spring_stiffness",
+    "Form Power (W)":          "form_power",
+    "Air Power (W)":           "air_power",
+}
+_CH_LABEL: dict[str, str] = {v: k for k, v in _CHANNEL_OPTS.items()}
+_CH_UNIT: dict[str, str] = {
+    "heart_rate":           "bpm",
+    "speed":                "min/km",   # displayed as pace
+    "cadence":              "spm",
+    "altitude":             "m",
+    "power":                "W",
+    "stride_length":        "mm",
+    "vertical_oscillation": "mm",
+    "stance_time":          "ms",
+    "leg_spring_stiffness": "kN/m",
+    "form_power":           "W",
+    "air_power":            "W",
+    "impact_loading_rate":  "BW/s",
+}
+_CH_COLOR: dict[str, str] = {
+    "heart_rate":           HR_COLOR,
+    "speed":                PACE_COLOR,
+    "cadence":              "#27ae60",
+    "altitude":             "#1abc9c",
+    "power":                "#e67e22",
+    "stride_length":        "#9b59b6",
+    "vertical_oscillation": "#e91e8c",
+    "stance_time":          "#00bcd4",
+    "leg_spring_stiffness": "#3498db",
+    "form_power":           "#e67e22",
+    "air_power":            "#7f8c8d",
+}
+
+# — channel selectors (options updated dynamically when real data is loaded)
 ch_a_w = pn.widgets.Select(
-    name="Channel A", options=CHANNEL_NAMES, value="Heart Rate (bpm)", width=220,
+    name="Channel A", options=_CHANNEL_OPTS, value="heart_rate", width=220,
 )
 ch_b_w = pn.widgets.Select(
-    name="Channel B", options=CHANNEL_NAMES, value="Cadence (rpm)", width=220,
+    name="Channel B", options=_CHANNEL_OPTS, value="speed", width=220,
 )
 
 # — preset dropdown
@@ -200,6 +250,11 @@ min_speed_w = pn.widgets.FloatInput(
     name="Min Speed (m/s)",
     value=2.0, step=0.1, start=0.0, end=10.0,
     width=130,
+)
+burn_in_w = pn.widgets.FloatInput(
+    name="Burn-in (min)",
+    value=5.0, step=0.5, start=0.0, end=60.0,
+    width=120,
 )
 
 # Sync preset → manual fields
@@ -292,7 +347,7 @@ plot_resid_b = pn.bind(_residuals_fig,  ch_b_w, smoother_type_w, sma_window_w, e
 def section(title: str) -> pn.Column:
     return pn.Column(
         pn.pane.HTML(
-            f'<div style="font-size:13px;font-weight:600;color:#555;'
+            f'<div style="font-size:13px;font-weight:600;color:#aaa;'
             f'text-transform:uppercase;letter-spacing:0.6px;'
             f'border-bottom:2px solid {ACCENT};padding-bottom:4px;'
             f'margin-top:12px;">{title}</div>'
@@ -313,10 +368,11 @@ save_btn    = pn.widgets.Button(name="💾  Save",    button_type="warning",  wi
 
 
 def _on_analyse_click(event):
-    """Run the RunTrackz analysis pipeline for the uploaded .fit file."""
-    if fit_file_input.value is None or not fit_file_input.filename:
+    """Run the RunTrackz analysis pipeline using cached or freshly parsed data."""
+    # Need either a cached run (from Preview) or an uploaded file
+    if _ls.run is None and (fit_file_input.value is None or not fit_file_input.filename):
         pn.state.notifications.error(
-            "No .fit file uploaded — use the sidebar to upload a file first.",
+            "No data loaded — upload a .fit file and click 🔍 Preview first.",
             duration=5000,
         )
         return
@@ -325,24 +381,35 @@ def _on_analyse_click(event):
 
     analyse_btn.loading = True
     analyse_btn.name    = "Analysing…"
-    tmp_path = None
 
     try:
-        # ── Save bytes to a temp file ────────────────────────────────────
-        suffix = pathlib.Path(fit_file_input.filename).suffix or ".fit"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(fit_file_input.value)
-            tmp_path = pathlib.Path(tmp.name)
-
-        # ── Load via FitTrackz adapter ───────────────────────────────────
-        from viewtrackz.fittrackz_adapter import load as _fit_load
         from runtrackz import hr_analysis, pace_analysis
         from runtrackz.long_run_analysis import (
             analyze as _lr_analyze,
             analyze_form_resilience as _lr_form,
         )
 
-        run        = _fit_load(tmp_path)
+        # ── Use cached RunData from Preview, or parse fresh ──────────────
+        if _ls.run is not None:
+            run = _ls.run
+        else:
+            # Fallback: parse via the full adapter (no preview was run)
+            from viewtrackz.fittrackz_adapter import load as _fit_load
+            tmp_path = None
+            try:
+                suffix = pathlib.Path(fit_file_input.filename).suffix or ".fit"
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                    tmp.write(fit_file_input.value)
+                    tmp_path = pathlib.Path(tmp.name)
+                run = _fit_load(tmp_path)
+                _ls.run = run
+            finally:
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink()
+                    except Exception:
+                        pass
+
         hr_stats   = hr_analysis.analyze(run)
         pace_stats = pace_analysis.analyze(run)
 
@@ -353,24 +420,134 @@ def _on_analyse_click(event):
                 long_run_stats=long_run_stats,
                 form_resilience=form_resilience,
             )
+            # Auto-switch to the Long Run tab (index 1)
+            tabs.active = 1
             pn.state.notifications.success(
-                f"Long run analysis complete — switch to the Long Run tab.",
-                duration=5000,
+                "Long run analysis complete!", duration=4000,
             )
         else:
             pn.state.notifications.info(
-                f"Analysis for '{act_type}' is not yet wired up in this prototype.",
+                f"Analysis for '{act_type}' is not yet wired up.",
                 duration=5000,
             )
 
     except Exception as exc:
+        import traceback
         pn.state.notifications.error(
-            f"Analysis failed: {exc}",
-            duration=10_000,
+            f"Analysis failed: {exc}", duration=10_000,
         )
+        print(traceback.format_exc())   # also log to server console
     finally:
         analyse_btn.loading = False
         analyse_btn.name    = "⚡  Analyse"
+
+
+analyse_btn.on_click(_on_analyse_click)
+
+
+# ── Load & Smooth reactive state ──────────────────────────────────────────────
+
+class _LoadSmoothState(param.Parameterized):
+    """Reactive holder for the currently parsed .fit file."""
+    raw_df     = param.Parameter(default=None)  # full DataFrame from run_fit()
+    run        = param.Parameter(default=None)  # RunData (channel-mapped)
+    filename   = param.String(default="")
+    status_msg = param.String(default="")
+
+
+_ls = _LoadSmoothState()
+
+parse_btn = pn.widgets.Button(name="🔍  Preview", button_type="primary", width=150)
+
+
+def _on_parse_click(event):
+    """
+    Parse the uploaded .fit file with current smoother settings, store the raw
+    DataFrame and RunData in ``_ls``, and update the preview charts.
+    """
+    if fit_file_input.value is None or not fit_file_input.filename:
+        _ls.status_msg = "❌ No file uploaded — use the sidebar first."
+        return
+
+    parse_btn.loading = True
+    parse_btn.name    = "Parsing…"
+    tmp_path = None
+
+    try:
+        from viewtrackz.config import FITTRACKZ_DIR, RUNTRACKZ_DIR
+
+        # Ensure both FitTrackz sub-dirs are on the path
+        for p in (str(FITTRACKZ_DIR), str(FITTRACKZ_DIR / "analysis"), str(RUNTRACKZ_DIR)):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+
+        from analysis.utils import run_fit as _run_fit
+        from viewtrackz.fittrackz_adapter import _map_columns, _build_session
+        import runtrackz
+
+        # ── Smoother settings from existing controls ──────────────────────
+        method = smoother_type_w.value.lower()       # "sma" / "ema" / "none"
+        if method == "sma":
+            param_val: float | None = float(sma_window_w.value)
+        elif method == "ema":
+            param_val = float(ema_alpha_w.value)
+        else:
+            method    = "none"
+            param_val = None
+
+        channels = [
+            "heart_rate", "speed", "altitude", "cadence", "power",
+            "stride_length", "vertical_oscillation", "stance_time",
+            "leg_spring_stiffness", "form_power", "air_power", "impact_loading_rate",
+        ]
+
+        # ── Save to temp file ─────────────────────────────────────────────
+        suffix = pathlib.Path(fit_file_input.filename).suffix or ".fit"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(fit_file_input.value)
+            tmp_path = pathlib.Path(tmp.name)
+
+        # ── Call FitTrackz binary ─────────────────────────────────────────
+        raw_df = _run_fit(
+            fit_file=tmp_path,
+            channels=channels,
+            smoother=method if method != "none" else None,
+            param=param_val,
+            min_speed=min_speed_w.value,
+        )
+
+        # ── Build RunData so Analyse can reuse it ─────────────────────────
+        mapped_df = _map_columns(raw_df)
+        session   = _build_session(mapped_df, tmp_path)
+        run = runtrackz.RunData.from_dataframe(
+            mapped_df,
+            session=session,
+            source_file=tmp_path,
+            is_smoothed=(method != "none"),
+        )
+        run._smoother_used = (  # type: ignore[attr-defined]
+            f"{method}_{param_val}" if method != "none" else "none"
+        )
+
+        _ls.raw_df     = raw_df
+        _ls.run        = run
+        _ls.filename   = fit_file_input.filename
+
+        n_min  = float(raw_df["elapsed_min"].max()) if "elapsed_min"  in raw_df.columns else 0.0
+        dist_m = float(raw_df["distance_m"].max())  if "distance_m"   in raw_df.columns else 0.0
+        _ls.status_msg = (
+            f"✅ {fit_file_input.filename}  ·  "
+            f"{dist_m / 1000:.2f} km  ·  {n_min:.0f} min  ·  "
+            f"{len(raw_df):,} records"
+        )
+
+    except Exception as exc:
+        import traceback
+        _ls.status_msg = f"❌ Parse failed: {exc}"
+        print(traceback.format_exc())
+    finally:
+        parse_btn.loading = False
+        parse_btn.name    = "🔍  Preview"
         if tmp_path is not None:
             try:
                 tmp_path.unlink()
@@ -378,27 +555,222 @@ def _on_analyse_click(event):
                 pass
 
 
-analyse_btn.on_click(_on_analyse_click)
+parse_btn.on_click(_on_parse_click)
+
+
+@pn.depends(_ls.param.status_msg)
+def _load_status_pane(status_msg):
+    if not status_msg:
+        return pn.pane.HTML("")
+    color = "#27ae60" if status_msg.startswith("✅") else "#e74c3c"
+    return pn.pane.HTML(
+        f'<div style="color:{color};font-size:13px;padding:6px 0;">{status_msg}</div>'
+    )
+
+
+# ── Update channel selector options when real data is loaded ──────────────────
+
+def _update_ch_options(event):
+    """Sync channel selector options to the columns present in the raw DataFrame."""
+    df = event.new
+    if df is None:
+        return
+    # Channels that have BOTH raw_ and smoothed_ columns
+    raw_keys = {c.removeprefix("raw_")      for c in df.columns if c.startswith("raw_")}
+    sm_keys  = {c.removeprefix("smoothed_") for c in df.columns if c.startswith("smoothed_")}
+    avail    = raw_keys & sm_keys
+
+    # Keep only non-all-NaN channels
+    valid = set()
+    for ch in avail:
+        col = f"smoothed_{ch}"
+        if col in df.columns:
+            vals = df[col].values.astype(float)
+            if not np.all(np.isnan(vals)):
+                valid.add(ch)
+
+    if not valid:
+        return
+
+    # Build ordered options dict preserving _CHANNEL_OPTS label order
+    new_opts: dict[str, str] = {}
+    for label, key in _CHANNEL_OPTS.items():
+        if key in valid:
+            new_opts[label] = key
+    # Append any unlisted channels with a generic label
+    for key in sorted(valid):
+        if key not in new_opts.values():
+            new_opts[key] = key
+
+    # Update selectors; preserve current value if still valid
+    ch_a_w.options = new_opts
+    ch_b_w.options = new_opts
+    vals = list(new_opts.values())
+    if ch_a_w.value not in vals:
+        ch_a_w.value = "heart_rate" if "heart_rate" in vals else vals[0]
+    if ch_b_w.value not in vals:
+        ch_b_w.value = "speed" if "speed" in vals else (vals[1] if len(vals) > 1 else vals[0])
+
+
+_ls.param.watch(_update_ch_options, "raw_df")
+
+
+# ── 2×2 channel preview grid ──────────────────────────────────────────────────
+
+def _ch_arrays(df: pd.DataFrame, ch_key: str):
+    """
+    Return (raw_vals, smoothed_vals) for *ch_key*, both as float arrays.
+    Speed is converted to pace (min/km) before returning.
+    Returns (None, None) when the channel is absent or all-NaN.
+    """
+    raw_col = f"raw_{ch_key}"
+    sm_col  = f"smoothed_{ch_key}"
+
+    def _load(col):
+        if col not in df.columns:
+            return None
+        arr = df[col].values.astype(float)
+        if ch_key == "speed":
+            with np.errstate(divide="ignore", invalid="ignore"):
+                arr = np.where(arr > 0, 1000.0 / arr / 60.0, np.nan)
+        return arr if not np.all(np.isnan(arr)) else None
+
+    return _load(raw_col), _load(sm_col)
+
+
+def _make_ch_figs(df: pd.DataFrame, ch_key: str, t: np.ndarray,
+                  burn_in_min: float = 0.0):
+    """
+    Build (top_fig, resid_fig) for one channel.
+
+    top_fig   — raw (grey) vs smoothed (accent colour) overlay, height 300.
+    resid_fig — raw − smoothed filled residuals, height 200.
+
+    burn_in_min: smoothed values before this elapsed time are hidden (set to NaN)
+                 so the sensor warm-up phase is excluded from the smoothed line.
+                 Raw data is always drawn in full.
+    """
+    raw_vals, sm_vals = _ch_arrays(df, ch_key)
+
+    title  = _CH_LABEL.get(ch_key, ch_key)
+    ylabel = _CH_UNIT.get(ch_key, "")
+    color  = _CH_COLOR.get(ch_key, ACCENT)
+    flip   = ch_key == "speed"   # pace axis: slower = larger value → flip
+
+    # ── Apply burn-in mask to smoothed only ───────────────────────────────
+    if sm_vals is not None and burn_in_min > 0.0:
+        sm_vals = sm_vals.copy()
+        sm_vals[t < burn_in_min] = np.nan
+
+    # ── Top: raw + smoothed ───────────────────────────────────────────────
+    top = figure(
+        title=title, height=300,
+        x_axis_label="elapsed (min)", y_axis_label=ylabel,
+        toolbar_location="above", sizing_mode="stretch_width",
+    )
+    # Shaded burn-in region
+    if burn_in_min > 0.0:
+        top.add_layout(BoxAnnotation(
+            right=burn_in_min,
+            fill_color="#3d1a6e", fill_alpha=0.40, line_color=None,
+        ))
+        top.add_layout(Span(
+            location=burn_in_min, dimension="height",
+            line_color="#9b59b6", line_dash="dashed", line_width=1.2,
+        ))
+    if raw_vals is not None:
+        top.line(t, raw_vals, color="#cccccc", line_width=1.5,
+                 legend_label="Raw", alpha=0.85)
+    if sm_vals is not None:
+        top.line(t, sm_vals, color=color, line_width=2.5,
+                 legend_label="Smoothed")
+    if flip:
+        top.y_range.flipped = True
+    top.legend.location    = "bottom_left" if flip else "top_left"
+    top.legend.click_policy = "hide"
+
+    # ── Bottom: residuals (only where smoothed is valid) ──────────────────
+    resid = figure(
+        title=f"Residuals  (raw − smoothed)  [{ylabel}]", height=200,
+        x_axis_label="elapsed (min)", y_axis_label=ylabel,
+        toolbar_location="above", sizing_mode="stretch_width",
+    )
+    if burn_in_min > 0.0:
+        resid.add_layout(BoxAnnotation(
+            right=burn_in_min,
+            fill_color="#3d1a6e", fill_alpha=0.40, line_color=None,
+        ))
+        resid.add_layout(Span(
+            location=burn_in_min, dimension="height",
+            line_color="#9b59b6", line_dash="dashed", line_width=1.2,
+        ))
+    resid.add_layout(
+        Span(location=0, dimension="width",
+             line_color="#999999", line_dash="dashed", line_width=1)
+    )
+    if raw_vals is not None and sm_vals is not None:
+        res    = raw_vals - sm_vals
+        zeros_ = np.zeros(len(t))
+        pos    = np.where(~np.isnan(res) & (res >= 0), res, np.nan)
+        neg    = np.where(~np.isnan(res) & (res <  0), res, np.nan)
+        resid.varea(x=t, y1=zeros_, y2=np.nan_to_num(pos), color=color,    alpha=0.35)
+        resid.varea(x=t, y1=zeros_, y2=np.nan_to_num(neg), color="#e74c3c", alpha=0.25)
+        resid.line(t, np.nan_to_num(res, nan=0.0), color=color,
+                   line_width=1.2, alpha=0.75)
+
+    return top, resid
+
+
+@pn.depends(_ls.param.raw_df, ch_a_w.param.value, ch_b_w.param.value,
+            burn_in_w.param.value)
+def _load_preview_pane(raw_df, ch_a, ch_b, burn_in_min):
+    """
+    Reactive 2×2 grid: raw+smoothed overlay (top) and residuals (bottom)
+    for the two user-selected channels.  Re-renders on data load, channel
+    change, or burn-in adjustment.
+    """
+    if raw_df is None:
+        return pn.pane.Markdown(
+            "_Upload a .fit file in the sidebar, adjust smoother settings if desired, "
+            "then click **🔍 Preview** to inspect channels before analysing._",
+            margin=(20, 0),
+        )
+
+    t = (raw_df["elapsed_min"].values
+         if "elapsed_min" in raw_df.columns
+         else np.arange(len(raw_df)) / 60.0)
+
+    top_a, res_a = _make_ch_figs(raw_df, ch_a, t, burn_in_min=burn_in_min)
+    top_b, res_b = _make_ch_figs(raw_df, ch_b, t, burn_in_min=burn_in_min)
+
+    return pn.Column(
+        pn.Row(
+            pn.pane.Bokeh(top_a, sizing_mode="stretch_width"),
+            pn.pane.Bokeh(top_b, sizing_mode="stretch_width"),
+        ),
+        pn.Row(
+            pn.pane.Bokeh(res_a, sizing_mode="stretch_width"),
+            pn.pane.Bokeh(res_b, sizing_mode="stretch_width"),
+        ),
+        sizing_mode="stretch_width",
+    )
 
 tab_smooth = pn.Column(
-    # ── Step 1: Channel & smoother controls ────────────────────────────────
-    section("1 · Channel Selection & Smoothing"),
+    # ── Step 1: Upload & Smoother ───────────────────────────────────────────
+    section("1 · Upload & Smoother"),
+    pn.pane.HTML(
+        '<p style="font-size:12px;color:#888;margin:2px 0 8px 0;">'
+        "Upload a .fit file using the sidebar.  "
+        "Adjust the smoother below, then click <strong>🔍 Preview</strong> to "
+        "inspect the parsed channels.  Click <strong>⚡ Analyse</strong> when ready."
+        "</p>"
+    ),
     pn.Row(
-        # Channel selectors
-        pn.Column(ch_a_w, ch_b_w, width=240),
-
-        # Preset + manual type + both param inputs
         pn.Column(
             preset_w,
-            pn.Row(
-                smoother_type_w,
-                sma_window_w,
-                ema_alpha_w,
-            ),
+            pn.Row(smoother_type_w, sma_window_w, ema_alpha_w),
             width=460,
         ),
-
-        # Min speed + note
         pn.Column(
             min_speed_w,
             pn.pane.HTML(
@@ -407,21 +779,44 @@ tab_smooth = pn.Column(
                 "and the smoother resets at each gap."
                 "</span>"
             ),
-            width=200,
+            width=180,
         ),
-        align="start",
+        pn.Column(
+            burn_in_w,
+            pn.pane.HTML(
+                '<span style="font-size:11px;color:#888;">'
+                "Smoothed line starts after this<br>"
+                "many minutes; raw data kept."
+                "</span>"
+            ),
+            width=170,
+        ),
+        pn.Column(parse_btn, margin=(18, 0, 0, 10)),
+        align="end",
     ),
+    _load_status_pane,
 
-    # ── Charts ─────────────────────────────────────────────────────────────
-    pn.Row(plot_raw_a, plot_raw_b, sizing_mode="stretch_width"),
-    pn.Row(plot_resid_a, plot_resid_b, sizing_mode="stretch_width"),
+    # ── Step 2: Channel Preview ─────────────────────────────────────────────
+    section("2 · Channel Preview"),
+    pn.Row(
+        pn.Column(
+            pn.pane.HTML(
+                '<span style="font-size:11px;color:#888;line-height:1.6;">'
+                "Select two channels to inspect raw vs smoothed and residuals below."
+                "</span>"
+            ),
+            pn.Row(ch_a_w, ch_b_w),
+            margin=(0, 0, 8, 0),
+        ),
+    ),
+    _load_preview_pane,
 
-    # ── Step 2: Classify & Analyse ─────────────────────────────────────────
-    section("2 · Classify & Analyse"),
+    # ── Step 3: Classify & Analyse ──────────────────────────────────────────
+    section("3 · Classify & Analyse"),
     pn.Row(type_sel, pn.Column(pn.pane.Markdown(""), analyse_btn), align="end"),
 
-    # ── Step 3: Save ───────────────────────────────────────────────────────
-    section("3 · Save to Database"),
+    # ── Step 4: Save ────────────────────────────────────────────────────────
+    section("4 · Save to Database"),
     pn.Row(save_btn),
 
     sizing_mode="stretch_width",
@@ -524,10 +919,10 @@ def _trimp_chart(height=250):
 
 def stat_card(label: str, value: str) -> pn.pane.HTML:
     return pn.pane.HTML(
-        f'<div style="background:#f8f9fa;border-radius:8px;padding:14px 18px;'
-        f'text-align:center;border:1px solid #dee2e6;min-width:110px;">'
-        f'<div style="font-size:22px;font-weight:700;color:#2c3e50;margin-bottom:4px;">{value}</div>'
-        f'<div style="font-size:11px;color:#7f8c8d;text-transform:uppercase;letter-spacing:0.5px;">{label}</div>'
+        f'<div style="background:#1e1e2e;border-radius:8px;padding:14px 18px;'
+        f'text-align:center;border:1px solid #3a3a5c;min-width:110px;">'
+        f'<div style="font-size:22px;font-weight:700;color:#e0e0f0;margin-bottom:4px;">{value}</div>'
+        f'<div style="font-size:11px;color:#9090b0;text-transform:uppercase;letter-spacing:0.5px;">{label}</div>'
         f'</div>',
         sizing_mode="stretch_width",
     )
@@ -1056,6 +1451,8 @@ template = pn.template.FastListTemplate(
     accent=ACCENT,
     sidebar_width=240,
     collapsed_sidebar=False,
+    theme="dark",
+    theme_toggle=True,
 )
 
 template.servable()

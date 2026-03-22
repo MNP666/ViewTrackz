@@ -326,9 +326,10 @@ def _make_form_plot(
         if not xs:
             continue
         source = ColumnDataSource({"x": xs, "y": ys})
-        p.circle(
+        p.scatter(
             x="x", y="y",
             source=source,
+            marker="circle",
             color=_ZONE_COLORS[zone],
             legend_label=_ZONE_LABELS[zone],
             size=7,
@@ -349,7 +350,7 @@ def _make_form_plot(
         p.add_layout(lbl)
 
     # ── Legend styling ────────────────────────────────────────────────────
-    p.legend.location = "upper right"
+    p.legend.location = "top_right"
     p.legend.label_text_font_size = "10px"
     p.legend.click_policy = "hide"
     p.legend.background_fill_alpha = 0.7

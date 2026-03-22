@@ -47,13 +47,26 @@ SMOOTHERS = {
 
 DEFAULT_SMOOTHER = "SMA (window=10)"
 
-# Channels to request from FitTrackz (subset of what the device may record)
+# Channels to request from FitTrackz (subset of what the device may record).
+# Running dynamics channels (stride_length, vertical_oscillation, stance_time)
+# are native Coros fields; leg_spring_stiffness is a Stryd developer field.
+# FitTrackz outputs NaN columns for channels absent from the device, so it
+# is safe to always request the full list.
 FIT_CHANNELS = [
     "heart_rate",
     "speed",
     "altitude",
     "cadence",
     "power",
+    # Coros running dynamics
+    "stride_length",
+    "vertical_oscillation",
+    "stance_time",
+    # Stryd developer fields (NaN if no Stryd pod paired)
+    "leg_spring_stiffness",
+    "form_power",
+    "air_power",
+    "impact_loading_rate",
 ]
 
 # ── Activity types ────────────────────────────────────────────────────────────
